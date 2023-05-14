@@ -39,9 +39,26 @@ func Auth(next http.Handler) http.Handler {
 
 // DESC: func AuthAdmin is a middleware to check user login role, only admin can pass this middleware
 func AuthAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}) // your code here }) // TODO: replace this
-}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie("user_login_role")
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(model.ErrorResponse{Error: err.Error()})
+			return
+		}
 
+		if c.Value != "admin" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login role not Admin"})
+			return
+		}
+
+		ctx := r.Context()
+		ctx = context.WithValue(ctx, "userRole", c.Value)
+
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 
 func Login(w http.ResponseWriter, r *http.Request) {
@@ -75,50 +92,63 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-		// Baca file users.txt
-		users, err := ioutil.ReadFile("data/users.txt")
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
+	// Baca file users.txt
+	users, err := ioutil.ReadFile("data/users.txt")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
 
-		// Cari user berdasarkan ID & Name
-		userFound := false
-		var foundUser model.User
-		for _, user := range strings.Split(string(users), "\n") {
-			if user == "" {
-				continue
-			}
-			parts := strings.Split(user, "_")
-			if len(parts) < 4 {
-				continue
-			}
-			if parts[0] == loginUser.ID {
-				userFound = true
-				foundUser.ID = parts[0]
-				foundUser.Name = parts[1]
-				foundUser.StudyCode = parts[2]
-				foundUser.Role = parts[3]
-				break
-			}
-		}
+	// cek apabila sudah ada di map login
+	fmt.Println(loginUser, UserLogin, string(users))
+	if data, exist := UserLogin[loginUser.ID]; exist {
+		http.SetCookie(w, &http.Cookie{Name: "user_login_id", Value: data.ID})
+		http.SetCookie(w, &http.Cookie{Name: "user_login_role", Value: data.Role})
 
-		// Jika user tidak ditemukan
-		if !userFound {
-			http.Error(w, `{"error":"user not found"}`, http.StatusBadRequest)
-			return
-		}
-
-		// Berikan response success
-		http.SetCookie(w, &http.Cookie{Name: "user_login_id", Value: foundUser.ID})
-		http.SetCookie(w, &http.Cookie{Name: "user_login_role", Value: foundUser.Role})
 		response := fmt.Sprintf(`{"username":"%s","message":"login success"}`, loginUser.ID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(response))
+		return
+	}
 
-		// Tambahkan user login ke dalam Map
-		UserLogin[foundUser.ID] = foundUser
+	// Cari user berdasarkan ID & Name
+	userFound := false
+	var foundUser model.User
+	for _, user := range strings.Split(string(users), "\n") {
+		if user == "" {
+			continue
+		}
+		parts := strings.Split(user, "_")
+		if len(parts) < 4 {
+			continue
+		}
+		if parts[0] == loginUser.ID {
+			userFound = true
+			foundUser.ID = parts[0]
+			foundUser.Name = parts[1]
+			foundUser.StudyCode = parts[2]
+			foundUser.Role = parts[3]
+			break
+		}
+	}
+
+	// Jika user tidak ditemukan
+	if !userFound {
+		http.Error(w, `{"error":"user not found"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Berikan response success
+	http.SetCookie(w, &http.Cookie{Name: "user_login_id", Value: foundUser.ID})
+	http.SetCookie(w, &http.Cookie{Name: "user_login_role", Value: foundUser.Role})
+	response := fmt.Sprintf(`{"username":"%s","message":"login success"}`, loginUser.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(response))
+
+	// Tambahkan user login ke dalam Map
+	UserLogin[foundUser.ID] = foundUser
 }
 
 func Register(w http.ResponseWriter, r *http.Request) {
@@ -262,71 +292,88 @@ func GetStudyProgram(w http.ResponseWriter, r *http.Request) {
 }
 
 func AddUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte(`{"error":"Method is not allowed!"}`))
-			return
-		}
+	// Check if Method == Post
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"error":"Method is not allowed!"}`))
+		return
+	}
 
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"Bad request body"}`))
-			return
-		}
+	// Check user login
+	userID, ok := r.Context().Value("userID").(string)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login id not found"})
+		return
+	}
 
-		var newUser model.User
-		err = json.Unmarshal(body, &newUser)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"Failed to unmarshal request body"}`))
-			return
-		}
+	// Check admin role
+	userRole := r.Context().Value("userRole").(string)
+	if userRole != UserLogin[userID].Role {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login role not Admin"})
+		return
+	}
 
-		if newUser.ID == "" || newUser.Name == "" || newUser.StudyCode == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"ID, name, or study code is empty"}`))
-			return
-		}
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"Bad request body"}`))
+		return
+	}
 
-		// check if user ID already exists
-		users, err := ioutil.ReadFile("data/users.txt")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"Failed to read users data"}`))
-			return
-		}
+	var newUser model.User
+	err = json.Unmarshal(body, &newUser)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"Failed to unmarshal request body"}`))
+		return
+	}
 
-		if strings.Contains(string(users), newUser.ID) {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"user id already exist"}`))
-			return
-		}
+	if newUser.ID == "" || newUser.Name == "" || newUser.StudyCode == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"ID, name, or study code is empty"}`))
+		return
+	}
 
-		// check if study code exists
-		studies, err := ioutil.ReadFile("data/list-study.txt")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"Failed to read studies data"}`))
-			return
-		}
+	// check if user ID already exists
+	users, err := ioutil.ReadFile("data/users.txt")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"Failed to read users data"}`))
+		return
+	}
 
-		if !strings.Contains(string(studies), newUser.StudyCode) {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"study code not found"}`))
-			return
-		}
+	if strings.Contains(string(users), newUser.ID) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"user id already exist"}`))
+		return
+	}
 
-		// append new user to users file
-		err = ioutil.WriteFile("data/users.txt", []byte(fmt.Sprintf("%s_%s_%s\n", newUser.ID, newUser.Name, newUser.StudyCode)), 0644)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte(`{"error":"Failed to write user data"}`))
-			return
-		}
+	// check if study code exists
+	studies, err := ioutil.ReadFile("data/list-study.txt")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"Failed to read studies data"}`))
+		return
+	}
 
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(fmt.Sprintf(`{"username":"%s","message":"add user success"}`, newUser.ID)))
+	if !strings.Contains(string(studies), newUser.StudyCode) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"study code not found"}`))
+		return
+	}
+
+	// append new user to users file
+	err = ioutil.WriteFile("data/users.txt", []byte(fmt.Sprintf("%s_%s_%s\n", newUser.ID, newUser.Name, newUser.StudyCode)), 0644)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"Failed to write user data"}`))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf(`{"username":"%s","message":"add user success"}`, newUser.ID)))
 }
 
 func DeleteUser(w http.ResponseWriter, r *http.Request) {
