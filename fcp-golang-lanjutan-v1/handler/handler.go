@@ -53,8 +53,16 @@ func AuthAdmin(next http.Handler) http.Handler {
 			return
 		}
 
+		userLoginId, err := r.Cookie("user_login_id")
+		if err != nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(model.ErrorResponse{Error: err.Error()})
+			return
+		}
+
 		ctx := r.Context()
 		ctx = context.WithValue(ctx, "userRole", c.Value)
+		ctx = context.WithValue(ctx, "userLoginId", userLoginId.Value)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -230,8 +238,6 @@ func Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func Logout(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value("userID").(string)
-
 	// Check if Method == Post
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -240,6 +246,7 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if user already login
+	userID := r.Context().Value("userID").(string)
 	user, exist := UserLogin[userID]
 	if !exist {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -259,36 +266,45 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 
 func GetStudyProgram(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"error":"Method is not allowed!"}`)
-			return
-		}
-
-		data, err := ioutil.ReadFile("data/list-study.txt")
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		lines := strings.Split(string(data), "\n")
-		var studyData []model.StudyData
-		for _, line := range lines {
-			if line == "" {
-				continue
-			}
-			fields := strings.Split(line, "_")
-			if len(fields) != 2 {
-				log.Fatalf("Invalid data format: %s", line)
-			}
-			studyData = append(studyData, model.StudyData{
-				Code: fields[0],
-				Name: fields[1],
-			})
-		}
-
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(studyData)
+		fmt.Fprintf(w, `{"error":"Method is not allowed!"}`)
+		return
+	}
+
+	// Check if user already login
+	userID := r.Context().Value("userID").(string)
+	_, exist := UserLogin[userID]
+	if !exist {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login id not found"})
+		return
+	}
+
+	data, err := ioutil.ReadFile("data/list-study.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var studyData []model.StudyData
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "_")
+		if len(fields) != 2 {
+			log.Fatalf("Invalid data format: %s", line)
+		}
+		studyData = append(studyData, model.StudyData{
+			Code: fields[0],
+			Name: fields[1],
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(studyData)
 }
 
 func AddUser(w http.ResponseWriter, r *http.Request) {
@@ -377,58 +393,75 @@ func AddUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func DeleteUser(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "DELETE" {
-			http.Error(w, `{"error":"Method is not allowed!"}`, http.StatusMethodNotAllowed)
-			return
-		}
+	if r.Method != http.MethodDelete {
+	w.WriteHeader(http.StatusMethodNotAllowed)
+	w.Write([]byte(`{"error":"Method is not allowed!"}`))
+	return
+	}
 
-		// Cek query parameter
-		id := r.URL.Query().Get("id")
-		if id == "" {
-			http.Error(w, `{"error":"user id is empty"}`, http.StatusBadRequest)
-			return
-		}
+	// Check user login
+	userID, ok := r.Context().Value("userID").(string)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login id not found"})
+		return
+	}
 
-		// Baca file users.txt
-		users, err := ioutil.ReadFile("data/users.txt")
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
+	// Check admin role
+	userRole := r.Context().Value("userRole").(string)
+	if userRole != UserLogin[userID].Role {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login role not Admin"})
+		return
+	}
 
-		// Cari user berdasarkan ID
-		userFound := false
-		var newUsers []string
-		for _, user := range strings.Split(string(users), "\n") {
-			if user == "" {
-				continue
-			}
-			parts := strings.Split(user, "_")
-			if parts[0] == id {
-				userFound = true
-				continue
-			}
-			newUsers = append(newUsers, user)
-		}
+	// Cek query parameter
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, `{"error":"user id is empty"}`, http.StatusBadRequest)
+		return
+	}
 
-		// Jika user tidak ditemukan
-		if !userFound {
-			http.Error(w, `{"error":"user id not found"}`, http.StatusBadRequest)
-			return
-		}
+	// Baca file users.txt
+	users, err := ioutil.ReadFile("data/users.txt")
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
 
-		// Simpan kembali data user yang masih ada
-		newContent := strings.Join(newUsers, "\n")
-		if err := ioutil.WriteFile("data/users.txt", []byte(newContent), 0644); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
-			return
+	// Cari user berdasarkan ID
+	userFound := false
+	var newUsers []string
+	for _, user := range strings.Split(string(users), "\n") {
+		if user == "" {
+			continue
 		}
+		parts := strings.Split(user, "_")
+		if parts[0] == id {
+			userFound = true
+			continue
+		}
+		newUsers = append(newUsers, user)
+	}
 
-		// Berikan response success
-		response := fmt.Sprintf(`{"username":"%s","message":"delete success"}`, id)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(response))
+	// Jika user tidak ditemukan
+	if !userFound {
+		http.Error(w, `{"error":"user id not found"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Simpan kembali data user yang masih ada
+	newContent := strings.Join(newUsers, "\n")
+	if err := ioutil.WriteFile("data/users.txt", []byte(newContent), 0644); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%v"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	// Berikan response success
+	response := fmt.Sprintf(`{"username":"%s","message":"delete success"}`, id)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(response))
 }
 
 // DESC: Gunakan variable ini sebagai goroutine di handler GetWeather
